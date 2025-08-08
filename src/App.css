@@ -132,6 +132,7 @@ html, body {
 .navbar-right {
   display: flex;
   gap: 32px;
+  align-items: center;
 }
 
 .navbar-right a {
@@ -142,6 +143,25 @@ html, body {
 
 .navbar-right a:hover {
   color: #d8b4fe;
+}
+
+.fullscreen-button {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: white;
+  padding: 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s ease;
+  backdrop-filter: blur(8px);
+}
+
+.fullscreen-button:hover {
+  background: rgba(255, 255, 255, 0.2);
+  transform: scale(1.05);
 }
 
 /* Hero Section */

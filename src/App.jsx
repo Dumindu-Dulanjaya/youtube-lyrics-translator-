@@ -1,11 +1,12 @@
-import React, { useState } from "react";
-import { Music, Globe, Play, Sparkles, ArrowRight } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { Music, Globe, Play, Sparkles, ArrowRight, Maximize, Minimize } from "lucide-react";
 import "./App.css";
 
 function App() {
   const [youtubeLink, setYoutubeLink] = useState("");
   const [language, setLanguage] = useState("Sinhala");
   const [isLoading, setIsLoading] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const handleTranslate = () => {
     setIsLoading(true);
@@ -14,6 +15,36 @@ function App() {
       setIsLoading(false);
     }, 2000);
   };
+
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      // Enter fullscreen
+      document.documentElement.requestFullscreen().then(() => {
+        setIsFullscreen(true);
+      }).catch((err) => {
+        console.error("Error attempting to enable fullscreen:", err);
+      });
+    } else {
+      // Exit fullscreen
+      document.exitFullscreen().then(() => {
+        setIsFullscreen(false);
+      }).catch((err) => {
+        console.error("Error attempting to exit fullscreen:", err);
+      });
+    }
+  };
+
+  // Listen for fullscreen changes (when user presses ESC)
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, []);
 
   return (
     <div className="app-container">
@@ -33,6 +64,13 @@ function App() {
           <span className="navbar-title">LyricsFlow</span>
         </div>
         <div className="navbar-right">
+          <button 
+            onClick={toggleFullscreen}
+            className="fullscreen-button"
+            title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+          >
+            {isFullscreen ? <Minimize size={20} /> : <Maximize size={20} />}
+          </button>
           <a href="#home">Home</a>
           <a href="#about">About</a>
           <a href="#contact">Contact</a>
