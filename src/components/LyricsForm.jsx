@@ -1,297 +1,196 @@
-// src/components/LyricsForm.jsx
-import React, { useState, useEffect } from 'react';
-import { Play, Globe, AlertTriangle, RefreshCw, CheckCircle, Loader, Copy, ChevronDown } from 'lucide-react';
-import lyricsApi from '../api/lyricsApi';
-import translateApi from '../api/translateApi';
-import { getPopularLanguages, getAllLanguages, getLanguageName } from '../utils/languageUtils';
+import React, { useState, useReducer } from 'react';
+import { extractLyrics } from '../api/lyricsApi';
+import { translate } from '../api/translateApi';
+import {
+  Youtube,
+  Globe2,
+  Loader2,
+  AlertTriangle,
+  CheckCircle,
+  Copy,
+} from 'lucide-react';
 
-const LyricsForm = () => {
-  const [formData, setFormData] = useState({
-    youtubeUrl: '',
-    targetLanguage: 'en' // Default to English
-  });
-  
-  const [state, setState] = useState({
-    loading: false,
-    error: null,
-    result: null,
-    step: 'idle', // idle, extracting, translating, completed, error
-    retryCount: 0
-  });
+const initialState = {
+  error: null,
+  result: null,
+  loading: false,
+};
 
-  const [languageState, setLanguageState] = useState({
-    showAllLanguages: false,
-    supportedLanguages: []
-  });
+function reducer(state, action) {
+  switch (action.type) {
+    case 'START':
+      return { ...state, loading: true, error: null, result: null };
+    case 'SUCCESS':
+      return { ...state, loading: false, result: action.payload };
+    case 'ERROR':
+      return { ...state, loading: false, error: action.payload };
+    default:
+      return state;
+  }
+}
 
-  // Load supported languages on component mount
-  useEffect(() => {
-    loadSupportedLanguages();
-  }, []);
-
-  const loadSupportedLanguages = async () => {
-    try {
-      // Try to get languages from API first
-      const apiLanguages = await translateApi.getSupportedLanguages();
-      
-      if (apiLanguages && apiLanguages.length > 0) {
-        setLanguageState(prev => ({ ...prev, supportedLanguages: apiLanguages }));
-      } else {
-        // Use our comprehensive language list
-        setLanguageState(prev => ({ 
-          ...prev, 
-          supportedLanguages: getPopularLanguages() 
-        }));
-      }
-    } catch (error) {
-      console.error('Failed to load languages:', error);
-      // Use fallback popular languages
-      setLanguageState(prev => ({ 
-        ...prev, 
-        supportedLanguages: getPopularLanguages() 
-      }));
-    }
-  };
-
-  const getDisplayLanguages = () => {
-    if (languageState.showAllLanguages) {
-      return getAllLanguages();
-    }
-    return languageState.supportedLanguages.length > 0 
-      ? languageState.supportedLanguages 
-      : getPopularLanguages();
-  };
-
-  const handleInputChange = (field, value) => {
-    setFormData(prev => ({
-      ...prev,
-      [field]: value
-    }));
-    
-    // Clear error when user starts typing
-    if (state.error) {
-      setState(prev => ({ ...prev, error: null }));
-    }
-  };
+export default function LyricsForm() {
+  const [url, setUrl] = useState('');
+  const [language, setLanguage] = useState('en');
+  const [state, dispatch] = useReducer(reducer, initialState);
 
   const getErrorMessage = (error) => {
-    const errorMessages = {
-      'INVALID_URL': 'Please enter a valid YouTube URL (e.g., https://youtu.be/... or https://youtube.com/watch?v=...)',
-      'VIDEO_NOT_FOUND': 'This video is not available. It might be private, deleted, or blocked in your region.',
-      'NO_LYRICS_FOUND': 'No lyrics found in this video. Try a song with clear vocals or captions enabled.',
-      'NETWORK_ERROR': 'Connection failed. Please check your internet connection and try again.',
-      'TIMEOUT': 'Request timed out. The video might be too long. Please try a shorter video.',
-      'RATE_LIMITED': 'Too many requests. Please wait a moment and try again.',
-      'SERVER_ERROR': 'Server error. Please try again in a few minutes.',
-      'TRANSLATION_ERROR': 'Translation failed. Please try again or select a different language.',
-      'ALL_SERVICES_FAILED': 'Translation services are currently unavailable. Please try again later.',
-      'TEXT_TOO_LONG': 'The lyrics are too long to translate. Try a shorter song.',
-      'QUOTA_EXCEEDED': 'Translation quota exceeded. Please try again later.'
-    };
-    
-    return errorMessages[error.type] || error.message || 'An unexpected error occurred. Please try again.';
+    if (!error) return '';
+    if (typeof error === 'string') return error;
+    if (error.type === 'MAX_RETRIES') {
+      return 'We tried multiple times but could not fetch the lyrics. Please try again later.';
+    }
+    return error.message || 'Something went wrong. Please try again.';
   };
 
-  const getStepMessage = (step) => {
-    const stepMessages = {
-      'extracting': 'Extracting lyrics from YouTube video...',
-      'translating': 'Translating lyrics to your selected language...',
-      'completed': 'Translation completed successfully!',
-      'error': 'Something went wrong'
-    };
-    
-    return stepMessages[step] || '';
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text);
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
-    if (!formData.youtubeUrl.trim()) {
-      setState(prev => ({
-        ...prev,
-        error: { type: 'INVALID_URL', message: 'Please enter a YouTube URL' }
-      }));
-      return;
-    }
-
-    setState(prev => ({
-      ...prev,
-      loading: true,
-      error: null,
-      result: null,
-      step: 'extracting',
-      retryCount: 0
-    }));
+    dispatch({ type: 'START' });
 
     try {
-      // Step 1: Extract lyrics
-      setState(prev => ({ ...prev, step: 'extracting' }));
-      const lyricsResult = await lyricsApi.extractLyrics(formData.youtubeUrl);
-      
-      if (!lyricsResult.success) {
-        throw lyricsResult.error;
+      const lyricsResp = await extractLyrics(url);
+
+      if (!lyricsResp.success) {
+        dispatch({ type: 'ERROR', payload: lyricsResp.error });
+        return;
       }
 
-      // Step 2: Translate lyrics
-      setState(prev => ({ ...prev, step: 'translating' }));
-      const translationResult = await translateApi.translate(
-        lyricsResult.data.lyrics,
-        formData.targetLanguage
-      );
-
-      if (!translationResult.success) {
-        throw translationResult.error;
+      if (!lyricsResp.data.lyrics) {
+        dispatch({
+          type: 'ERROR',
+          payload: {
+            type: 'NO_LYRICS_FOUND',
+            message: 'No lyrics found. Please paste manually.',
+          },
+        });
+        return;
       }
 
-      // Success
-      setState(prev => ({
-        ...prev,
-        loading: false,
-        step: 'completed',
-        result: {
-          ...lyricsResult.data,
-          ...translationResult.data
-        }
-      }));
+      const tr = await translate(lyricsResp.data.lyrics, language);
+      if (!tr.success) {
+        dispatch({ type: 'ERROR', payload: tr.error });
+        return;
+      }
 
-    } catch (error) {
-      setState(prev => ({
-        ...prev,
-        loading: false,
-        step: 'error',
-        error: error
-      }));
+      dispatch({
+        type: 'SUCCESS',
+        payload: {
+          translatedLyrics: tr.data.translatedText,
+          originalLyrics: lyricsResp.data.lyrics,
+          title: lyricsResp.data.title,
+        },
+      });
+    } catch (err) {
+      dispatch({
+        type: 'ERROR',
+        payload: {
+          type: err?.type || 'UNKNOWN_ERROR',
+          message: err?.message || 'Something went wrong.',
+        },
+      });
     }
-  };
-
-  const handleRetry = async () => {
-    if (state.retryCount >= 3) {
-      setState(prev => ({
-        ...prev,
-        error: {
-          type: 'MAX_RETRIES',
-          message: 'Maximum retry attempts reached. Please check your input and try again later.'
-        }
-      }));
-      return;
-    }
-
-    setState(prev => ({
-      ...prev,
-      retryCount: prev.retryCount + 1
-    }));
-
-    await handleSubmit({ preventDefault: () => {} });
-  };
-
-  const copyToClipboard = (text) => {
-    navigator.clipboard.writeText(text).then(() => {
-      // Could add a toast notification here
-      console.log('Copied to clipboard');
-    });
-  };
-
-  const canRetry = (error) => {
-    const retryableErrors = [
-      'NETWORK_ERROR', 
-      'TIMEOUT', 
-      'SERVER_ERROR', 
-      'TRANSLATION_ERROR',
-      'SERVICE_UNAVAILABLE'
-    ];
-    return error && retryableErrors.includes(error.type) && state.retryCount < 3;
   };
 
   return (
-    <div className="max-w-4xl mx-auto p-6">
-      {/* Form */}
-      <form onSubmit={handleSubmit} className="bg-white/10 backdrop-blur-sm rounded-2xl p-8 shadow-xl">
-        {/* YouTube URL Input */}
-        <div className="mb-6">
-          <label className="flex items-center text-white/90 text-sm font-medium mb-3">
-            <Play className="w-4 h-4 mr-2" />
-            YouTube Song Link
-          </label>
-          <input
-            type="url"
-            value={formData.youtubeUrl}
-            onChange={(e) => handleInputChange('youtubeUrl', e.target.value)}
-            placeholder="https://youtu.be/kPa7bsKwL-c?si=DLrstgPguY..."
-            className="w-full px-4 py-3 bg-white/5 border border-white/20 rounded-xl text-white placeholder-white/50 focus:outline-none focus:border-white/40 focus:bg-white/10 transition-all"
-            disabled={state.loading}
-          />
-        </div>
-
-        {/* Language Selection */}
-        <div className="mb-8">
-          <label className="flex items-center text-white/90 text-sm font-medium mb-3">
-            <Globe className="w-4 h-4 mr-2" />
-            Translate to
+    <div className="max-w-4xl mx-auto px-4 py-8">
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {/* URL input */}
+        <div>
+          <label className="block text-sm font-medium text-gray-200 mb-2">
+            YouTube Song URL
           </label>
           <div className="relative">
-            <select
-              value={formData.targetLanguage}
-              onChange={(e) => handleInputChange('targetLanguage', e.target.value)}
-              className="w-full px-4 py-3 bg-white/5 border border-white/20 rounded-xl text-white focus:outline-none focus:border-white/40 focus:bg-white/10 transition-all appearance-none pr-10"
-              disabled={state.loading}
-            >
-              {getDisplayLanguages().map(lang => (
-                <option key={lang.code} value={lang.code} className="bg-gray-800">
-                  {lang.flag ? `${lang.flag} ` : ''}{lang.name}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="absolute right-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-white/60 pointer-events-none" />
+            <Youtube className="w-5 h-5 text-gray-400 absolute left-3 top-3" />
+            <input
+              type="url"
+              required
+              placeholder="https://youtube.com/watch?v=..."
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-100"
+            />
           </div>
-          
-          {/* Show more languages toggle */}
-          {!languageState.showAllLanguages && (
-            <button
-              type="button"
-              onClick={() => setLanguageState(prev => ({ ...prev, showAllLanguages: true }))}
-              className="mt-2 text-white/60 hover:text-white/80 text-sm underline transition-colors"
-            >
-              Show more languages
-            </button>
-          )}
         </div>
 
-        {/* Submit Button */}
+        {/* Language selector */}
+        <div>
+          <label className="block text-sm font-medium text-gray-200 mb-2">
+            Target Language
+          </label>
+          <div className="relative">
+            <Globe2 className="w-5 h-5 text-gray-400 absolute left-3 top-3" />
+            <select
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-gray-100"
+            >
+              <option value="en">English</option>
+              <option value="si">Sinhala</option>
+              <option value="ta">Tamil</option>
+              <option value="hi">Hindi</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Submit button */}
         <button
           type="submit"
-          disabled={state.loading || !formData.youtubeUrl.trim()}
-          className="w-full bg-gradient-to-r from-purple-500 to-pink-500 text-white py-4 rounded-xl font-semibold hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center"
+          disabled={state.loading}
+          className="w-full flex justify-center items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-white"
         >
-          {state.loading ? (
-            <>
-              <Loader className="w-5 h-5 mr-2 animate-spin" />
-              {getStepMessage(state.step)}
-            </>
-          ) : (
-            'Translate Lyrics'
-          )}
+          {state.loading && <Loader2 className="w-5 h-5 animate-spin mr-2" />}
+          {state.loading ? 'Translating...' : 'Translate Lyrics'}
         </button>
-
-        {/* Retry Button */}
-        {state.error && canRetry(state.error) && (
-          <button
-            type="button"
-            onClick={handleRetry}
-            className="w-full mt-3 bg-white/10 text-white py-3 rounded-xl font-medium hover:bg-white/20 transition-all flex items-center justify-center"
-          >
-            <RefreshCw className="w-4 h-4 mr-2" />
-            Retry ({3 - state.retryCount} attempts left)
-          </button>
-        )}
       </form>
 
-      {/* Error Display */}
+      {/* Error Message */}
       {state.error && (
         <div className="mt-6 bg-red-500/10 border border-red-500/20 rounded-xl p-6">
           <div className="flex items-start">
             <AlertTriangle className="w-5 h-5 text-red-400 mt-0.5 mr-3 flex-shrink-0" />
             <div>
               <h3 className="text-red-300 font-medium mb-1">
-                {state.error.type === 'MAX_RETRIES' ? 'Maximum Retries Reached' : 'Error'}
+                {state.error.type === 'MAX_RETRIES'
+                  ? 'Maximum Retries Reached'
+                  : 'Error'}
               </h3>
-              <p className="text-red-200 text-sm"></p>
+              <p className="text-red-200 text-sm">
+                {getErrorMessage(state.error)}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Success Display */}
+      {state.result && (
+        <div className="mt-6 bg-green-500/10 border border-green-500/20 rounded-xl p-6 space-y-4">
+          <div className="flex items-start">
+            <CheckCircle className="w-5 h-5 text-green-400 mt-0.5 mr-3 flex-shrink-0" />
+            <div>
+              <h3 className="text-green-300 font-medium mb-1">
+                Translated Lyrics
+              </h3>
+              <p className="text-green-200 text-sm whitespace-pre-wrap">
+                {state.result.translatedLyrics}
+              </p>
+              <button
+                type="button"
+                onClick={() =>
+                  copyToClipboard(state.result.translatedLyrics)
+                }
+                className="mt-3 flex items-center text-green-300 hover:text-green-100 text-sm"
+              >
+                <Copy className="w-4 h-4 mr-2" /> Copy to Clipboard
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

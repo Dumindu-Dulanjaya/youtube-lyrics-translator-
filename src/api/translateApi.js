@@ -1,4 +1,6 @@
 // src/api/translateApi.js
+import axios from 'axios';
+
 class TranslationError extends Error {
   constructor(message, type, statusCode = null) {
     super(message);
@@ -10,10 +12,26 @@ class TranslationError extends Error {
 
 class TranslateApi {
   constructor() {
+    this.baseURL = process.env.REACT_APP_API_BASE_URL || '/api';
     this.googleTranslateKey = process.env.REACT_APP_GOOGLE_TRANSLATE_KEY;
     this.libretranslateURL = process.env.REACT_APP_LIBRETRANSLATE_URL || 'https://libretranslate.de';
     this.timeout = 15000; // 15 seconds
     this.maxTextLength = 5000; // Maximum characters per request
+
+    // Configure axios instance
+    this.client = axios.create({
+      baseURL: this.baseURL,
+      timeout: this.timeout,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    // Setup response interceptor for error handling
+    this.client.interceptors.response.use(
+      (response) => response,
+      (error) => this.handleAxiosError(error)
+    );
   }
 
   // Language code mapping
@@ -46,10 +64,89 @@ class TranslateApi {
       'chinese': 'zh',
       'zh': 'zh',
       'arabic': 'ar',
-      'ar': 'ar'
+      'ar': 'ar',
+      'bengali': 'bn',
+      'bn': 'bn',
+      'urdu': 'ur',
+      'ur': 'ur',
+      'thai': 'th',
+      'th': 'th',
+      'vietnamese': 'vi',
+      'vi': 'vi',
+      'indonesian': 'id',
+      'id': 'id',
+      'malay': 'ms',
+      'ms': 'ms'
     };
     
     return langMap[language.toLowerCase()] || language.toLowerCase();
+  }
+
+  // Handle axios errors
+  handleAxiosError(error) {
+    if (error.code === 'ECONNABORTED') {
+      throw new TranslationError(
+        'Translation timeout. Please try again',
+        'TIMEOUT'
+      );
+    }
+
+    if (!error.response) {
+      // Network error
+      if (!navigator.onLine) {
+        throw new TranslationError(
+          'No internet connection. Please check your network',
+          'NETWORK_ERROR'
+        );
+      }
+      
+      throw new TranslationError(
+        'Network error. Please check your connection',
+        'NETWORK_ERROR'
+      );
+    }
+
+    const { status, data } = error.response;
+    const errorMessage = data?.message || data?.error || 'Unknown error';
+
+    switch (status) {
+      case 400:
+        throw new TranslationError(
+          errorMessage || 'Invalid translation request',
+          'INVALID_REQUEST',
+          400
+        );
+      case 403:
+        throw new TranslationError(
+          'Translation quota exceeded or invalid API key',
+          'QUOTA_EXCEEDED',
+          403
+        );
+      case 404:
+        throw new TranslationError(
+          'Translation service not found',
+          'SERVICE_NOT_FOUND',
+          404
+        );
+      case 429:
+        throw new TranslationError(
+          'Translation rate limit exceeded. Please try again later',
+          'RATE_LIMITED',
+          429
+        );
+      case 500:
+        throw new TranslationError(
+          'Translation server error. Please try again later',
+          'SERVER_ERROR',
+          500
+        );
+      default:
+        throw new TranslationError(
+          errorMessage || `HTTP ${status}`,
+          'HTTP_ERROR',
+          status
+        );
+    }
   }
 
   // Validate translation parameters
@@ -126,7 +223,71 @@ class TranslateApi {
     return chunks;
   }
 
-  // Google Translate API implementation
+  // Main translate method using backend API
+  async translate(text, targetLanguage, sourceLanguage = 'auto') {
+    try {
+      this.validateTranslationRequest(text, targetLanguage);
+
+      const response = await this.client.post('/translate', {
+        text,
+        target: this.getLanguageCode(targetLanguage),
+        source: sourceLanguage === 'auto' ? 'auto' : this.getLanguageCode(sourceLanguage)
+      });
+
+      const data = response.data;
+
+      // Handle different response formats
+      if (data.success === false) {
+        throw new TranslationError(
+          data.error?.message || 'Translation failed',
+          data.error?.type || 'TRANSLATION_ERROR',
+          data.error?.statusCode
+        );
+      }
+
+      const translatedText = data.data?.translatedText || data.translatedText;
+      if (!translatedText) {
+        throw new TranslationError(
+          'Translation service returned empty result',
+          'TRANSLATION_EMPTY'
+        );
+      }
+
+      return {
+        success: true,
+        data: {
+          originalText: text,
+          translatedText,
+          sourceLanguage: data.data?.detectedLanguage || data.detectedLanguage || sourceLanguage,
+          targetLanguage: this.getLanguageCode(targetLanguage),
+          provider: data.data?.provider || data.provider || 'backend'
+        }
+      };
+
+    } catch (error) {
+      if (error instanceof TranslationError) {
+        return {
+          success: false,
+          error: {
+            message: error.message,
+            type: error.type,
+            statusCode: error.statusCode
+          }
+        };
+      }
+
+      console.error('translate error:', error);
+      return {
+        success: false,
+        error: {
+          message: error.message || 'Translation failed',
+          type: 'TRANSLATION_ERROR'
+        }
+      };
+    }
+  }
+
+  // Google Translate API implementation (fallback)
   async translateWithGoogle(text, targetLang, sourceLang = 'auto') {
     if (!this.googleTranslateKey) {
       throw new TranslationError(
@@ -287,8 +448,8 @@ class TranslateApi {
     }
   }
 
-  // Main translation method with fallback
-  async translate(text, targetLanguage, sourceLanguage = 'auto') {
+  // Advanced translate method with chunking and fallback
+  async translateAdvanced(text, targetLanguage, sourceLanguage = 'auto') {
     try {
       this.validateTranslationRequest(text, targetLanguage);
       
@@ -301,23 +462,40 @@ class TranslateApi {
       for (const chunk of chunks) {
         let chunkResult = null;
         
-        // Try Google Translate first
+        // Try backend API first
         try {
-          chunkResult = await this.translateWithGoogle(chunk, targetLanguage, sourceLanguage);
-          usedProvider = 'google';
-        } catch (googleError) {
-          console.warn('Google Translate failed:', googleError.message);
+          const backendResult = await this.translate(chunk, targetLanguage, sourceLanguage);
+          if (backendResult.success) {
+            chunkResult = {
+              translatedText: backendResult.data.translatedText,
+              detectedLanguage: backendResult.data.sourceLanguage,
+              provider: backendResult.data.provider
+            };
+            usedProvider = backendResult.data.provider;
+          } else {
+            throw new Error('Backend translation failed');
+          }
+        } catch (backendError) {
+          console.warn('Backend translate failed:', backendError.message);
           
-          // Fallback to LibreTranslate
+          // Try Google Translate
           try {
-            chunkResult = await this.translateWithLibre(chunk, targetLanguage, sourceLanguage);
-            usedProvider = 'libretranslate';
-          } catch (libreError) {
-            console.error('LibreTranslate also failed:', libreError.message);
-            throw new TranslationError(
-              'All translation services are currently unavailable',
-              'ALL_SERVICES_FAILED'
-            );
+            chunkResult = await this.translateWithGoogle(chunk, targetLanguage, sourceLanguage);
+            usedProvider = 'google';
+          } catch (googleError) {
+            console.warn('Google Translate failed:', googleError.message);
+            
+            // Fallback to LibreTranslate
+            try {
+              chunkResult = await this.translateWithLibre(chunk, targetLanguage, sourceLanguage);
+              usedProvider = 'libretranslate';
+            } catch (libreError) {
+              console.error('LibreTranslate also failed:', libreError.message);
+              throw new TranslationError(
+                'All translation services are currently unavailable',
+                'ALL_SERVICES_FAILED'
+              );
+            }
           }
         }
         
@@ -356,42 +534,95 @@ class TranslateApi {
   // Get supported languages
   async getSupportedLanguages() {
     try {
+      // Try to get from backend first
+      try {
+        const response = await this.client.get('/languages');
+        if (response.data && Array.isArray(response.data)) {
+          return response.data;
+        }
+      } catch (backendError) {
+        console.warn('Backend languages endpoint failed:', backendError.message);
+      }
+
+      // Fallback to LibreTranslate
       const response = await fetch(`${this.libretranslateURL}/languages`);
       
       if (response.ok) {
-        return await response.json();
+        const languages = await response.json();
+        return languages;
       }
       
-      // Fallback to common languages including English
-      return [
-        { code: 'en', name: 'English' },
-        { code: 'si', name: 'Sinhala' },
-        { code: 'ta', name: 'Tamil' },
-        { code: 'hi', name: 'Hindi' },
-        { code: 'es', name: 'Spanish' },
-        { code: 'fr', name: 'French' },
-        { code: 'de', name: 'German' },
-        { code: 'it', name: 'Italian' },
-        { code: 'pt', name: 'Portuguese' },
-        { code: 'ru', name: 'Russian' },
-        { code: 'ja', name: 'Japanese' },
-        { code: 'ko', name: 'Korean' },
-        { code: 'zh', name: 'Chinese (Simplified)' },
-        { code: 'ar', name: 'Arabic' },
-        { code: 'bn', name: 'Bengali' },
-        { code: 'ur', name: 'Urdu' },
-        { code: 'th', name: 'Thai' },
-        { code: 'vi', name: 'Vietnamese' },
-        { code: 'id', name: 'Indonesian' },
-        { code: 'ms', name: 'Malay' }
-      ];
+      // Final fallback to predefined languages
+      return this.getDefaultLanguages();
       
     } catch (error) {
       console.error('Failed to fetch supported languages:', error);
-      return [];
+      return this.getDefaultLanguages();
     }
+  }
+
+  // Get default language list
+  getDefaultLanguages() {
+    return [
+      { code: 'en', name: 'English' },
+      { code: 'si', name: 'Sinhala' },
+      { code: 'ta', name: 'Tamil' },
+      { code: 'hi', name: 'Hindi' },
+      { code: 'es', name: 'Spanish' },
+      { code: 'fr', name: 'French' },
+      { code: 'de', name: 'German' },
+      { code: 'it', name: 'Italian' },
+      { code: 'pt', name: 'Portuguese' },
+      { code: 'ru', name: 'Russian' },
+      { code: 'ja', name: 'Japanese' },
+      { code: 'ko', name: 'Korean' },
+      { code: 'zh', name: 'Chinese (Simplified)' },
+      { code: 'ar', name: 'Arabic' },
+      { code: 'bn', name: 'Bengali' },
+      { code: 'ur', name: 'Urdu' },
+      { code: 'th', name: 'Thai' },
+      { code: 'vi', name: 'Vietnamese' },
+      { code: 'id', name: 'Indonesian' },
+      { code: 'ms', name: 'Malay' }
+    ];
   }
 }
 
-export default new TranslateApi();
+// Create and export instance
+const translateApi = new TranslateApi();
+
+// Export both class methods and standalone functions for compatibility
+export default translateApi;
+
+// Standalone functions for backward compatibility
+export async function translate(text, target, source = 'auto') {
+  try {
+    return await translateApi.translate(text, target, source);
+  } catch (error) {
+    console.error('translate API error:', error);
+    return {
+      success: false,
+      error: {
+        type: error.type || 'NETWORK_ERROR',
+        message: error.message
+      }
+    };
+  }
+}
+
+export async function getSupportedLanguages() {
+  try {
+    return await translateApi.getSupportedLanguages();
+  } catch (error) {
+    console.error('getSupportedLanguages error:', error);
+    // Return minimal set as fallback
+    return [
+      { code: 'en', name: 'English' },
+      { code: 'si', name: 'Sinhala' },
+      { code: 'ta', name: 'Tamil' },
+      { code: 'hi', name: 'Hindi' }
+    ];
+  }
+}
+
 export { TranslationError };

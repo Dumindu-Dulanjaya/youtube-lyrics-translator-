@@ -1,4 +1,6 @@
 // src/api/lyricsApi.js
+import axios from 'axios';
+
 class LyricsApiError extends Error {
   constructor(message, type, statusCode = null) {
     super(message);
@@ -10,8 +12,23 @@ class LyricsApiError extends Error {
 
 class LyricsApi {
   constructor() {
-    this.baseURL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:3001/api';
+    this.baseURL = process.env.REACT_APP_API_BASE_URL || '/api';
     this.timeout = 30000; // 30 seconds
+    
+    // Configure axios instance
+    this.client = axios.create({
+      baseURL: this.baseURL,
+      timeout: this.timeout,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    // Setup response interceptor for error handling
+    this.client.interceptors.response.use(
+      (response) => response,
+      (error) => this.handleAxiosError(error)
+    );
   }
 
   validateYouTubeUrl(url) {
@@ -37,85 +54,63 @@ class LyricsApi {
     throw new LyricsApiError('Invalid YouTube URL format', 'INVALID_URL');
   }
 
-  async makeRequest(endpoint, options = {}) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+  handleAxiosError(error) {
+    if (error.code === 'ECONNABORTED') {
+      throw new LyricsApiError(
+        'Request timeout. The video might be too long or server is busy',
+        'TIMEOUT'
+      );
+    }
 
-    try {
-      const response = await fetch(`${this.baseURL}${endpoint}`, {
-        ...options,
-        signal: controller.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          ...options.headers
-        }
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        
-        switch (response.status) {
-          case 400:
-            throw new LyricsApiError(
-              errorData.message || 'Invalid request parameters',
-              'INVALID_REQUEST',
-              400
-            );
-          case 404:
-            throw new LyricsApiError(
-              'Video not found or unavailable',
-              'VIDEO_NOT_FOUND',
-              404
-            );
-          case 429:
-            throw new LyricsApiError(
-              'Rate limit exceeded. Please try again later',
-              'RATE_LIMITED',
-              429
-            );
-          case 500:
-            throw new LyricsApiError(
-              'Server error. Please try again later',
-              'SERVER_ERROR',
-              500
-            );
-          default:
-            throw new LyricsApiError(
-              errorData.message || `HTTP ${response.status}`,
-              'HTTP_ERROR',
-              response.status
-            );
-        }
-      }
-
-      return await response.json();
-    } catch (error) {
-      clearTimeout(timeoutId);
-
-      if (error.name === 'AbortError') {
-        throw new LyricsApiError(
-          'Request timeout. The video might be too long or server is busy',
-          'TIMEOUT'
-        );
-      }
-
-      if (error instanceof LyricsApiError) {
-        throw error;
-      }
-
+    if (!error.response) {
+      // Network error
       if (!navigator.onLine) {
         throw new LyricsApiError(
           'No internet connection. Please check your network',
           'NETWORK_ERROR'
         );
       }
-
+      
       throw new LyricsApiError(
         'Network error. Please check your connection',
         'NETWORK_ERROR'
       );
+    }
+
+    const { status, data } = error.response;
+    const errorMessage = data?.message || data?.error || 'Unknown error';
+
+    switch (status) {
+      case 400:
+        throw new LyricsApiError(
+          errorMessage || 'Invalid request parameters',
+          'INVALID_REQUEST',
+          400
+        );
+      case 404:
+        throw new LyricsApiError(
+          'Video not found or unavailable',
+          'VIDEO_NOT_FOUND',
+          404
+        );
+      case 429:
+        throw new LyricsApiError(
+          'Rate limit exceeded. Please try again later',
+          'RATE_LIMITED',
+          429
+        );
+      case 500:
+        throw new LyricsApiError(
+          'Server error. Please try again later',
+          'SERVER_ERROR',
+          500
+        );
+      default:
+        throw new LyricsApiError(
+          errorMessage || `HTTP ${status}`,
+          'HTTP_ERROR',
+          status
+        );
     }
   }
 
@@ -129,14 +124,23 @@ class LyricsApi {
         );
       }
 
-      const videoId = this.extractVideoId(youtubeUrl);
-      
-      const response = await this.makeRequest('/extract-lyrics', {
-        method: 'POST',
-        body: JSON.stringify({ videoId, url: youtubeUrl })
+      const response = await this.client.get('/lyrics', {
+        params: { url: youtubeUrl }
       });
 
-      if (!response.lyrics || response.lyrics.trim().length === 0) {
+      const data = response.data;
+
+      // Handle different response formats
+      if (data.success === false) {
+        throw new LyricsApiError(
+          data.error?.message || 'Failed to extract lyrics',
+          data.error?.type || 'EXTRACTION_ERROR',
+          data.error?.statusCode
+        );
+      }
+
+      const lyrics = data.data?.lyrics || data.lyrics;
+      if (!lyrics || lyrics.trim().length === 0) {
         throw new LyricsApiError(
           'No lyrics found in this video. Try a video with clear vocals or captions',
           'NO_LYRICS_FOUND'
@@ -146,11 +150,11 @@ class LyricsApi {
       return {
         success: true,
         data: {
-          lyrics: response.lyrics,
-          title: response.title || 'Unknown Title',
-          artist: response.artist || 'Unknown Artist',
-          duration: response.duration,
-          videoId
+          lyrics,
+          title: data.data?.title || data.title || 'Unknown Title',
+          artist: data.data?.artist || data.artist || 'Unknown Artist',
+          duration: data.data?.duration || data.duration,
+          videoId: this.extractVideoId(youtubeUrl)
         }
       };
 
@@ -159,6 +163,7 @@ class LyricsApi {
         throw error;
       }
       
+      console.error('extractLyrics error:', error);
       throw new LyricsApiError(
         'Failed to extract lyrics from video',
         'EXTRACTION_ERROR'
@@ -175,16 +180,25 @@ class LyricsApi {
         );
       }
 
-      const response = await this.makeRequest('/translate', {
-        method: 'POST',
-        body: JSON.stringify({
-          text: lyrics,
-          targetLanguage,
-          sourceLanguage: 'auto'
-        })
+      const response = await this.client.post('/translate', {
+        text: lyrics,
+        targetLanguage,
+        sourceLanguage: 'auto'
       });
 
-      if (!response.translatedText) {
+      const data = response.data;
+
+      // Handle different response formats
+      if (data.success === false) {
+        throw new LyricsApiError(
+          data.error?.message || 'Translation failed',
+          data.error?.type || 'TRANSLATION_ERROR',
+          data.error?.statusCode
+        );
+      }
+
+      const translatedText = data.data?.translatedText || data.translatedText;
+      if (!translatedText) {
         throw new LyricsApiError(
           'Translation service returned empty result',
           'TRANSLATION_EMPTY'
@@ -195,8 +209,8 @@ class LyricsApi {
         success: true,
         data: {
           originalText: lyrics,
-          translatedText: response.translatedText,
-          detectedLanguage: response.detectedLanguage,
+          translatedText,
+          detectedLanguage: data.data?.detectedLanguage || data.detectedLanguage,
           targetLanguage
         }
       };
@@ -206,6 +220,7 @@ class LyricsApi {
         throw error;
       }
       
+      console.error('translateLyrics error:', error);
       throw new LyricsApiError(
         'Translation service is currently unavailable',
         'TRANSLATION_ERROR'
@@ -233,12 +248,47 @@ class LyricsApi {
       };
 
     } catch (error) {
+      console.error('processVideo error:', error);
       return {
         success: false,
         error: {
           message: error.message,
           type: error.type,
           statusCode: error.statusCode
+        }
+      };
+    }
+  }
+
+  // Combined lyrics extraction and translation (matching the second version's pattern)
+  async lyricsTranslate(url, target = 'si') {
+    try {
+      const response = await this.client.post('/lyrics-translate', {
+        url,
+        target
+      });
+
+      const data = response.data;
+
+      if (data.success === false) {
+        return {
+          success: false,
+          error: {
+            type: data.error?.type || 'UNKNOWN_ERROR',
+            message: data.error?.message || 'Translation failed'
+          }
+        };
+      }
+
+      return data;
+
+    } catch (error) {
+      console.error('lyricsTranslate error:', error);
+      return {
+        success: false,
+        error: {
+          type: error.type || 'NETWORK_ERROR',
+          message: error.message
         }
       };
     }
@@ -274,5 +324,30 @@ class LyricsApi {
   }
 }
 
-export default new LyricsApi();
+// Create and export instance
+const lyricsApi = new LyricsApi();
+
+// Export both class methods and standalone functions for compatibility
+export default lyricsApi;
+
+// Standalone functions for backward compatibility
+export async function extractLyrics(youtubeUrl) {
+  try {
+    return await lyricsApi.extractLyrics(youtubeUrl);
+  } catch (error) {
+    console.error('extractLyrics error:', error);
+    return {
+      success: false,
+      error: {
+        type: error.type || 'NETWORK_ERROR',
+        message: error.message
+      }
+    };
+  }
+}
+
+export async function lyricsTranslate(url, target = 'si') {
+  return await lyricsApi.lyricsTranslate(url, target);
+}
+
 export { LyricsApiError };
